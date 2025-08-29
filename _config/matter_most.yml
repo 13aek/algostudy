@@ -2,80 +2,34 @@ name: Notify Mattermost on Push
 
 on:
   push:
-    branches: ["**"]   # 필요시 main 등으로 좁히세요
-
-# 최소 권한 원칙
-permissions:
-  contents: read
-
-concurrency:
-  group: notify-mattermost-${{ github.ref }}
-  cancel-in-progress: false
+    branches: ["**"]
 
 jobs:
   notify:
     runs-on: ubuntu-latest
-    env:
-      WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK_URL }}
-      REPO:   ${{ github.repository }}
-      BRANCH: ${{ github.ref_name }}
-      ACTOR:  ${{ github.actor }}
-      RAW_EVT: ${{ toJson(github.event) }}
 
     steps:
-      - name: Mask secret in logs
-        run: echo "::add-mask::${WEBHOOK_URL}"
-  
-      - name: Fail if secret missing
-        run: |
-          set -euo pipefail
-          if [ -z "${WEBHOOK_URL:-}" ]; then
-            echo "❌ Missing secret: MATTERMOST_WEBHOOK_URL"
-            exit 1
-          fi
-
-      - name: Enforce domain allowlist (defense-in-depth)
-        run: |
-          set -euo pipefail
-          case "$WEBHOOK_URL" in
-            https://meeting.ssafy.com/hooks/*) : ;;
-            *) echo "❌ WEBHOOK_URL not in allowed domain"; exit 1 ;;
-          esac
-
-      - name: Build sanitized payload JSON
+      - name: Build payload JSON
+        env:
+          GITHUB_EVENT: ${{ toJson(github.event) }}
+          REPO:   ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR:  ${{ github.actor }}
         run: |
           node -e '
-            const MAX_LINES = 20;        // 커밋 라인 수 제한
-            const MAX_MSG   = 300;       // 메시지 길이 제한(개당)
-            const evt = JSON.parse(process.env.RAW_EVT || "{}");
-            const sanitize = (s="") => String(s)
-              .replace(/@/g, "@\u200B")           // 멘션 무력화
-              .replace(/`/g, "´")                 // 코드블럭 무력화
-              .replace(/\]\(/g, "] (")            // [text](url) → [text] (url) 로 링크 비활성화
-              .replace(/https?:\/\//g, "hxxp://") // URL 비활성화(선택)
-              .replace(/[\u0000-\u001F\u007F]/g, " ");
-            const commitsRaw = (evt.commits||[]).slice(0, MAX_LINES);
-            const commits = commitsRaw.map(c=>{
-              const m = sanitize(c.message||"").slice(0, MAX_MSG);
-              const id = (c.id||"").slice(0,7);
-              return `- ${m} (${id})`;
-            }).join("\n") || "- (no commit messages)";
-            const header =
-              `*${sanitize(process.env.REPO)}*에 push event 발생\n` +
-              `브랜치: \`${sanitize(process.env.BRANCH)}\`\n` +
-              `작성자: ${sanitize(process.env.ACTOR)}\n\n`;
-            require("fs").writeFileSync("payload.json", JSON.stringify({ text: header + commits }));
+            const evt = JSON.parse(process.env.GITHUB_EVENT || "{}");
+            const commits = (evt.commits||[]).map(c => `- ${c.message} (${c.id.slice(0,7)})`).join("\n") || "- (no commit messages)";
+            const text =
+              `*${process.env.REPO}*에 push event 발생\n` +
+              `브랜치: \`${process.env.BRANCH}\`\n작성자: ${process.env.ACTOR}\n\n` +
+              commits;
+            require("fs").writeFileSync("payload.json", JSON.stringify({ text }));
           '
 
-
-      - name: Send to Mattermost (URL kept secret)
+      - name: Send to Mattermost
         run: |
-          set -euo pipefail
           curl -sS -X POST \
-            --proto "=https" --tlsv1.2 --http1.1 \
-            --connect-timeout 5 --max-time 10 --retry 3 --retry-delay 2 \
-            -H "Content-Type: application/json" \
+            -H 'Content-Type: application/json' \
             --data-binary @payload.json \
-            "$WEBHOOK_URL" \
-            -w "\nHTTP %{http_code}\n"
-
+            "${{ secrets.MATTERMOST_WEBHOOK }}" \
+            -w '\nHTTP %{http_code}\n'
